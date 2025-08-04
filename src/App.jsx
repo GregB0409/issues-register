@@ -69,7 +69,7 @@ export default function App() {
       console.log("Auto-saving projects:", projects);
       setSaving(true); // show "Saving..." message
 
-      fetch(`${API_BASE}/api/projects`), {
+      fetch(`${API_BASE}/api/projects`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(projects),
