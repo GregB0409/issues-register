@@ -1,38 +1,34 @@
-.App {
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  border: 1px solid #aaa;
+  padding: 2px;
+  text-align: left;
+  vertical-align: top;
+}
+
+/* Column widths to lock alignment */
+th:nth-child(1), td:nth-child(1) { width: 20%; }
+th:nth-child(2), td:nth-child(2) { width: 30%; }
+th:nth-child(3), td:nth-child(3) { width: 40%; }
+th:nth-child(4), td:nth-child(4) { width: 10%; }
+
+/* Checkbox centered */
+td:nth-child(4) {
   text-align: center;
+  vertical-align: middle;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
-}
-
-.App-header {
-  background-color: #282c34;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
-}
-
-.App-link {
-  color: #61dafb;
-}
-
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+/* Make textareas fill cell without breaking columns */
+textarea {
+  width: 100%;
+  height: 4em;
+  resize: none;
+  border: none;
+  box-sizing: border-box;
+  font-size: 14px;
 }
