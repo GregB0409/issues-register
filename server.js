@@ -4,13 +4,13 @@ const fs = require("fs");
 const cors = require("cors");
 
 const app = express();
-const PORT = 5001;
+const PORT = process.env.PORT || 5001;
 const DATA_FILE = "./data/projects.json";
 
 // Allow React frontend and all needed methods
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: "*", // allow all for now
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
   })
