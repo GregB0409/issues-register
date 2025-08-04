@@ -1,6 +1,8 @@
 import "./App.css";
 import React, { useState, useEffect } from "react";
 
+const API_BASE = "https://issues-register.onrender.com";
+
 const todayPrefix = () => {
   const today = new Date();
   const yyyy = today.getFullYear();
@@ -29,7 +31,7 @@ export default function App() {
 
   // Load projects from backend on first render
   useEffect(() => {
-    fetch("http://localhost:5001/api/projects")
+    fetch(`${API_BASE}/api/projects`)
       .then((res) => res.json())
       .then((data) => {
         
@@ -67,7 +69,7 @@ export default function App() {
       console.log("Auto-saving projects:", projects);
       setSaving(true); // show "Saving..." message
 
-      fetch("http://localhost:5001/api/projects", {
+      fetch(`${API_BASE}/api/projects`), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(projects),
