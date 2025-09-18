@@ -21,7 +21,7 @@ app.use(
     name: "sess",
     secret: SESSION_SECRET,
     httpOnly: true,
-    sameSite: "lax",
+    sameSite: "none",
     secure: !!process.env.NODE_ENV && process.env.NODE_ENV !== "development",
     maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
   })

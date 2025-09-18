@@ -1,7 +1,39 @@
 import "./App.css";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 
 const API_BASE = "https://issues-register.onrender.com";
+
+// ----- Exact endpoints from your server.js -----
+const ENDPOINTS = {
+  register: "/api/auth/register",
+  login: "/api/auth/login",
+  logout: "/api/auth/logout",
+  me: "/api/me",
+  projects: "/api/projects",
+};
+
+// Always include cookies
+async function apiFetch(path, { method = "GET", body, headers, ...rest } = {}) {
+  const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  const init = {
+    method,
+    credentials: "include",
+    headers: {
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(headers || {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    ...rest,
+  };
+  const res = await fetch(url, init);
+  let data = null;
+  try { data = await res.json(); } catch { /* non-JSON OK */ }
+  if (!res.ok) {
+    const msg = (data && (data.error || data.message)) || `${res.status} ${res.statusText}`;
+    throw new Error(msg);
+  }
+  return data;
+}
 
 const todayPrefix = () => {
   const today = new Date();
@@ -11,78 +43,157 @@ const todayPrefix = () => {
   return `${yyyy}-${mm}-${dd}: `;
 };
 
+function AuthPanel({ me, refreshMe }) {
+  const [mode, setMode] = useState("login"); // 'login' | 'signup'
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const canSubmit = useMemo(
+    () => email.trim().length > 3 && password.length >= 6 && !busy,
+    [email, password, busy]
+  );
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setBusy(true); setError("");
+    try {
+      if (mode === "signup") {
+        await apiFetch(ENDPOINTS.register, { method: "POST", body: { email, password } });
+      } else {
+        await apiFetch(ENDPOINTS.login, { method: "POST", body: { email, password } });
+      }
+      setPassword("");
+      await refreshMe();
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doLogout = async () => {
+    setBusy(true); setError("");
+    try {
+      await apiFetch(ENDPOINTS.logout, { method: "POST" });
+      await refreshMe();
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (me?.userId) {
+    return (
+      <div style={styles.card}>
+        <div style={styles.rowBetween}>
+          <div>
+            <div style={styles.muted}>Signed in as</div>
+            <div style={styles.bold}>{me.email || me.userId}</div>
+          </div>
+          <button onClick={doLogout} disabled={busy} style={styles.button}>
+            {busy ? "…" : "Log out"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={submit} style={styles.card}>
+      <div style={styles.tabs}>
+        <button type="button" onClick={() => setMode("login")}
+          style={{ ...styles.tab, ...(mode === "login" ? styles.tabActive : {}) }}>Log in</button>
+        <button type="button" onClick={() => setMode("signup")}
+          style={{ ...styles.tab, ...(mode === "signup" ? styles.tabActive : {}) }}>Sign up</button>
+      </div>
+
+      <label style={styles.label}>Email
+        <input type="email" autoComplete="email" value={email}
+               onChange={(e)=>setEmail(e.target.value)} style={styles.input}
+               placeholder="you@example.com" required />
+      </label>
+
+      <label style={styles.label}>Password
+        <input type="password"
+               autoComplete={mode==="login"?"current-password":"new-password"}
+               value={password} onChange={(e)=>setPassword(e.target.value)}
+               style={styles.input} placeholder="At least 6 characters"
+               required minLength={6}/>
+      </label>
+
+      {error ? <div style={styles.error}>{error}</div> : null}
+
+      <button type="submit" disabled={!canSubmit} style={styles.primaryButton}>
+        {busy ? "…" : mode === "login" ? "Log in" : "Create account"}
+      </button>
+    </form>
+  );
+}
+
 export default function App() {
   const [projects, setProjects] = useState([
-    {
-      name: "",
-      issues: [
-        {
-          issue: todayPrefix(),           // initial issue starts with date
-          statuses: [todayPrefix()],      // initial status starts with date
-          closed: false,
-        },
-      ],
-    },
+    { name: "", issues: [{ issue: todayPrefix(), statuses: [todayPrefix()], closed: false }] },
   ]);
-
   const [loaded, setLoaded] = useState(false);
-  const [fromBackend, setFromBackend] = useState(false); // ✅ new flag
-  const [saving, setSaving] = useState(false); // show "Saving..." feedback
+  const [fromBackend, setFromBackend] = useState(false);
+  const [saving, setSaving] = useState(false);
 
-  // Load projects from backend on first render
+  // auth
+  const [me, setMe] = useState(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  async function refreshMe() {
+    try { const data = await apiFetch(ENDPOINTS.me); setMe(data); }
+    catch { setMe({ userId: null }); }
+  }
+
+  // Check session on mount
   useEffect(() => {
-    fetch(`${API_BASE}/api/projects`)
-      .then((res) => res.json())
-      .then((data) => {
-        
-        console.log("Backend returned:", data);  // <--- add this
-        
-        if (data && Array.isArray(data) && data.length > 0) {
-          setProjects(data);
-          setFromBackend(true);   // ✅ Real data came from backend
-        } else {
-          // initialize with a dated first project (fallback only)
-          setProjects([
-            {
-              name: "",
-              issues: [
-                {
-                  issue: todayPrefix(),
-                  statuses: [todayPrefix()],
-                  closed: false,
-                },
-              ],
-            },
-          ]);
-          setFromBackend(false);  // ✅ This is just fallback
-        }
-        setLoaded(true);
-      })
-      .catch((err) => console.error("Failed to load projects", err));
+    (async () => {
+      await refreshMe();
+      setCheckingSession(false);
+    })();
   }, []);
 
-  // Auto-save projects 1 second after last change
+  // Load projects only *after* we know we are logged in
   useEffect(() => {
-    if (!loaded) return;
+    if (!me?.userId) return; // not logged in yet
+    (async () => {
+      try {
+        const data = await apiFetch(ENDPOINTS.projects);
+        console.log("Backend returned:", data);
+        if (Array.isArray(data) && data.length > 0) {
+          setProjects(data);
+          setFromBackend(true);
+        } else {
+          setProjects([{ name: "", issues: [{ issue: todayPrefix(), statuses: [todayPrefix()], closed: false }] }]);
+          setFromBackend(false);
+        }
+        setLoaded(true);
+      } catch (err) {
+        console.error("Failed to load projects", err);
+        setLoaded(true);
+        setFromBackend(false);
+      }
+    })();
+  }, [me?.userId]);
 
+  // Auto-save 1s after edits (only if loaded and logged in)
+  useEffect(() => {
+    if (!loaded || !me?.userId) return;
     const timeout = setTimeout(() => {
       console.log("Auto-saving projects:", projects);
-      setSaving(true); // show "Saving..." message
-
-      fetch(`${API_BASE}/api/projects`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(projects),
-      })
-        .then(() => setSaving(false))           // hide message after save
-        .catch((err) => {
-          console.error("Failed to save projects", err);
-          setSaving(false);
-        });
-    }, 1000); // wait 1 second after last edit
-
-    return () => clearTimeout(timeout); // cancel if user types again
-  }, [projects, loaded]);
+      setSaving(true);
+      apiFetch(ENDPOINTS.projects, { method: "PUT", body: projects })
+        .then(() => setSaving(false))
+        .catch((err) => { console.error("Failed to save projects", err); setSaving(false); });
+    }, 1000);
+    return () => clearTimeout(timeout);
+  }, [projects, loaded, me?.userId]);
 
   const handleProjectNameChange = (projectIndex, value) => {
     const newProjects = [...projects];
@@ -100,16 +211,9 @@ export default function App() {
     const newProjects = [...projects];
     const issue = newProjects[projectIndex].issues[issueIndex];
     issue.statuses[statusIndex] = value;
-
-    // Auto-add new status box if last one filled
-    if (
-      statusIndex === issue.statuses.length - 1 &&
-      value.trim() !== "" &&
-      !issue.closed
-    ) {
+    if (statusIndex === issue.statuses.length - 1 && value.trim() !== "" && !issue.closed) {
       issue.statuses.push(todayPrefix());
     }
-
     setProjects(newProjects);
   };
 
@@ -121,28 +225,12 @@ export default function App() {
   };
 
   const addProject = () => {
-    setProjects([
-      ...projects,
-      {
-        name: "",
-        issues: [
-          {
-            issue: todayPrefix(),          
-            statuses: [todayPrefix()],     
-            closed: false,
-          },
-        ],
-      },
-    ]);
+    setProjects([...projects, { name: "", issues: [{ issue: todayPrefix(), statuses: [todayPrefix()], closed: false }] }]);
   };
 
   const addIssue = (projectIndex) => {
     const newProjects = [...projects];
-    newProjects[projectIndex].issues.push({
-      issue: todayPrefix(),               
-      statuses: [todayPrefix()],          
-      closed: false,
-    });
+    newProjects[projectIndex].issues.push({ issue: todayPrefix(), statuses: [todayPrefix()], closed: false });
     setProjects(newProjects);
   };
 
@@ -150,28 +238,28 @@ export default function App() {
     <div className="App" style={{ padding: "0 20px" }}>
       <h1>Issues Register {saving && <span style={{ fontSize: "0.7em", color: "green" }}>Saving...</span>}</h1>
 
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      {checkingSession ? (
+        <div style={{ margin: "12px 0" }}>Checking session…</div>
+      ) : (
+        <AuthPanel me={me} refreshMe={refreshMe} />
+      )}
+
+      {!me?.userId ? (
+        <div style={styles.card}>
+          <div style={styles.muted}>Log in or sign up above to load and save your issues to your account.</div>
+        </div>
+      ) : null}
+
+      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 12 }}>
         <thead>
           <tr>
             <th style={{ textAlign: "center" }}>
-              <button onClick={addProject} style={{ marginBottom: "5px" }}>
-                + Add Project/Matter
-              </button>
+              <button onClick={addProject} style={{ marginBottom: "5px" }}>+ Add Project/Matter</button>
               <div>Project / Matter</div>
             </th>
-            <th style={{ textAlign: "center" }}>
-              <div>Issue</div>
-            </th>
+            <th style={{ textAlign: "center" }}><div>Issue</div></th>
             <th>Status Updates</th>
-            <th
-              style={{
-                textAlign: "center",
-                whiteSpace: "nowrap",
-                width: "1%",
-              }}
-            >
-              Closed
-            </th>
+            <th style={{ textAlign: "center", whiteSpace: "nowrap", width: "1%" }}>Closed</th>
           </tr>
         </thead>
         <tbody>
@@ -182,35 +270,14 @@ export default function App() {
                 {project.issues.map((issue, iIndex) => (
                   <tr key={`${pIndex}-${iIndex}`}>
                     {iIndex === 0 && (
-                      <td
-                        rowSpan={issueCount}
-                        style={{
-                          position: "relative",
-                          padding: 0,
-                          verticalAlign: "top",
-                        }}
-                      >
+                      <td rowSpan={issueCount} style={{ position: "relative", padding: 0, verticalAlign: "top" }}>
                         <textarea
                           value={project.name}
-                          onChange={(e) =>
-                            handleProjectNameChange(pIndex, e.target.value)
-                          }
+                          onChange={(e) => handleProjectNameChange(pIndex, e.target.value)}
                           placeholder="Project / Matter"
-                          style={{
-                            width: "100%",
-                            height: `${issueCount * 60}px`,
-                            boxSizing: "border-box",
-                            resize: "none",
-                          }}
+                          style={{ width: "100%", height: `${issueCount * 60}px`, boxSizing: "border-box", resize: "none" }}
                         />
-                        <button
-                          onClick={() => addIssue(pIndex)}
-                          style={{
-                            position: "absolute",
-                            bottom: "5px",
-                            right: "5px",
-                          }}
-                        >
+                        <button onClick={() => addIssue(pIndex)} style={{ position: "absolute", bottom: "5px", right: "5px" }}>
                           + Add Issue
                         </button>
                       </td>
@@ -219,9 +286,7 @@ export default function App() {
                     <td>
                       <textarea
                         value={issue.issue}
-                        onChange={(e) =>
-                          handleIssueChange(pIndex, iIndex, "issue", e.target.value)
-                        }
+                        onChange={(e) => handleIssueChange(pIndex, iIndex, "issue", e.target.value)}
                         placeholder="Issue"
                       />
                     </td>
@@ -232,34 +297,15 @@ export default function App() {
                           <textarea
                             key={sIndex}
                             value={status}
-                            onChange={(e) =>
-                              handleStatusChange(pIndex, iIndex, sIndex, e.target.value)
-                            }
-                            style={{
-                              margin: 0,
-                              border: "none",
-                              borderBottom:
-                                sIndex !== issue.statuses.length - 1
-                                  ? "1px solid #ccc"
-                                  : "none",
-                            }}
+                            onChange={(e) => handleStatusChange(pIndex, iIndex, sIndex, e.target.value)}
+                            style={{ margin: 0, border: "none", borderBottom: sIndex !== issue.statuses.length - 1 ? "1px solid #ccc" : "none" }}
                             placeholder="Status update"
                           />
                         ))}
                       </div>
                     </td>
-                    <td
-                      style={{
-                        textAlign: "center",
-                        whiteSpace: "nowrap",
-                        width: "1%",
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={issue.closed}
-                        onChange={() => handleClosedToggle(pIndex, iIndex)}
-                      />
+                    <td style={{ textAlign: "center", whiteSpace: "nowrap", width: "1%" }}>
+                      <input type="checkbox" checked={issue.closed} onChange={() => handleClosedToggle(pIndex, iIndex)} />
                     </td>
                   </tr>
                 ))}
@@ -271,3 +317,18 @@ export default function App() {
     </div>
   );
 }
+
+const styles = {
+  card: { border: "1px solid #e5e7eb", borderRadius: 12, padding: 16, marginTop: 8, background: "#fff", boxShadow: "0 1px 2px rgba(0,0,0,0.03)" },
+  tabs: { display: "flex", gap: 8, marginBottom: 8 },
+  tab: { border: "1px solid #e5e7eb", background: "#f9fafb", padding: "6px 10px", borderRadius: 8, cursor: "pointer" },
+  tabActive: { background: "#eef2ff", borderColor: "#c7d2fe", fontWeight: 600 },
+  primaryButton: { marginTop: 14, padding: "10px 14px", borderRadius: 8, border: "1px solid #4f46e5", background: "#4f46e5", color: "#fff", cursor: "pointer", fontWeight: 600 },
+  button: { padding: "8px 12px", borderRadius: 8, border: "1px solid #d1d5db", background: "#fff", cursor: "pointer" },
+  rowBetween: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  muted: { color: "#6b7280", fontSize: 13 },
+  bold: { fontWeight: 600 },
+  label: { display: "block", fontSize: 14, marginTop: 12 },
+  input: { width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 14 },
+  error: { marginTop: 8, color: "#b91c1c", background: "#fef2f2", border: "1px solid #fecaca", padding: "8px 10px", borderRadius: 8, fontSize: 13 },
+};
