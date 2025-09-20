@@ -111,9 +111,9 @@ async function readAllPG(userId) {
 async function writeAllPG(userId, value) {
   const payload = value ?? [];
   await pgPool.query(
-    `insert into app_state (user_id, payload) values ($1,$2)
-     on conflict (user_id) do update set payload=excluded.payload, updated_at=now()`,
-    [userId, payload]
+    `insert into app_state (user_id, payload) values ($1, $2::jsonb)
+     on conflict (user_id) do update set payload = excluded.payload, updated_at = now()`,
+    [userId, JSON.stringify(payload)]
   );
 }
 
