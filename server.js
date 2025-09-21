@@ -214,6 +214,14 @@ if (!usePG) {
   });
 }
 
+// ---- Serve React build (single-domain deploy) ----
+const CLIENT_DIR = path.join(__dirname, "build");
+app.use(express.static(CLIENT_DIR));
+app.get("*", (req, res) => {
+  if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
+  res.sendFile(path.join(CLIENT_DIR, "index.html"));
+});
+
 (async () => {
   if (usePG) {
     await initPG();
