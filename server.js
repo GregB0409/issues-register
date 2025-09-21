@@ -217,8 +217,8 @@ if (!usePG) {
 // ---- Serve React build (single-domain deploy) ----
 const CLIENT_DIR = path.join(__dirname, "build");
 app.use(express.static(CLIENT_DIR));
-app.get("*", (req, res) => {
-  if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
+// SPA fallback: any GET that does NOT start with /api/
+app.get(/^\/(?!api\/).*/, (req, res) => {
   res.sendFile(path.join(CLIENT_DIR, "index.html"));
 });
 
