@@ -10,22 +10,26 @@ const app = express();
 const PORT = process.env.PORT || 5001;
 const usePG = !!process.env.DATABASE_URL;
 
-app.use(cors({ origin: true, credentials: true })); // allow cookies from same origin
+app.use(cors({ origin: true, credentials: true })); // allow cookies
 app.use(express.json({ limit: "1mb" }));
 app.set("trust proxy", 1); // needed on some hosts to set secure cookies
 
 // --- session cookies (secure login) ---
 const SESSION_SECRET = process.env.SESSION_SECRET || "dev-insecure";
+const IN_PROD = process.env.NODE_ENV === "production";
+
 app.use(
   cookieSession({
     name: "sess",
     secret: SESSION_SECRET,
     httpOnly: true,
-    sameSite: "none",
-    secure: !!process.env.NODE_ENV && process.env.NODE_ENV !== "development",
+    // We use a single domain now, so LAX is perfect (works on localhost HTTP and on HTTPS in prod)
+    sameSite: "lax",
+    secure: IN_PROD, // false on localhost (HTTP), true on Render (HTTPS)
     maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
   })
 );
+
 
 // ---------- File storage (dev only) ----------
 const DATA_DIR = path.join(__dirname, "data");
@@ -78,6 +82,7 @@ async function initPG() {
       id serial primary key,
       email text unique not null,
       password_hash text not null,
+      display_name text,
       created_at timestamptz not null default now()
     );
     create table if not exists app_state (
@@ -86,16 +91,19 @@ async function initPG() {
       updated_at timestamptz not null default now()
     );
   `);
+  // If existing table lacked display_name
+  await pgPool.query(`alter table users add column if not exists display_name text;`);
 }
 async function getUserByEmail(email) {
   const { rows } = await pgPool.query(`select * from users where email=$1`, [email]);
   return rows[0] || null;
 }
-async function createUser(email, password) {
+async function createUser(email, password, displayName) {
   const hash = await bcrypt.hash(password, 12);
   const { rows } = await pgPool.query(
-    `insert into users (email, password_hash) values ($1,$2) returning id, email`,
-    [email, hash]
+    `insert into users (email, password_hash, display_name) values ($1,$2,$3)
+     returning id, email, display_name`,
+    [email, hash, displayName || null]
   );
   // pre-create empty state row
   await pgPool.query(
@@ -126,18 +134,18 @@ function requireAuth(req, res, next) {
 // ---------- Auth routes ----------
 app.post("/api/auth/register", async (req, res) => {
   try {
-    const { email, password } = req.body || {};
+    const { email, password, name } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: "email and password required" });
     if (usePG) {
       const existing = await getUserByEmail(email);
       if (existing) return res.status(409).json({ error: "email already exists" });
-      const user = await createUser(email, password);
+      const user = await createUser(email, password, name);
       req.session.userId = user.id;
-      res.json({ ok: true, email: user.email });
+      res.json({ ok: true, email: user.email, displayName: user.display_name || null });
     } else {
       // dev only: single user session without DB
       req.session.userId = 1;
-      res.json({ ok: true, email });
+      res.json({ ok: true, email, displayName: name || null });
     }
   } catch (e) {
     console.error("register error:", e);
@@ -154,7 +162,7 @@ app.post("/api/auth/login", async (req, res) => {
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: "invalid credentials" });
     req.session.userId = user.id;
-    return res.json({ ok: true, email: user.email });
+    return res.json({ ok: true, email: user.email, displayName: user.display_name || null });
   } else {
     // dev only: accept anything, single user
     req.session.userId = 1;
@@ -167,8 +175,58 @@ app.post("/api/auth/logout", (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/me", (req, res) => {
-  res.json({ userId: req.session.userId || null });
+// Change password (requires login)
+app.post("/api/auth/change-password", requireAuth, async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body || {};
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: "newPassword must be at least 6 chars" });
+    }
+    if (usePG) {
+      const { rows } = await pgPool.query(`select id, password_hash from users where id=$1`, [req.session.userId]);
+      const user = rows[0];
+      if (!user) return res.status(404).json({ error: "user not found" });
+      const ok = await bcrypt.compare(oldPassword || "", user.password_hash);
+      if (!ok) return res.status(401).json({ error: "old password incorrect" });
+      const newHash = await bcrypt.hash(newPassword, 12);
+      await pgPool.query(`update users set password_hash=$1 where id=$2`, [newHash, req.session.userId]);
+      return res.json({ ok: true });
+    } else {
+      // dev mode: accept any oldPassword
+      return res.json({ ok: true });
+    }
+  } catch (e) {
+    console.error("change-password error:", e);
+    res.status(500).json({ error: "failed to change password" });
+  }
+});
+
+// Profile
+app.get("/api/me", async (req, res) => {
+  if (!req.session.userId) return res.json({ userId: null });
+  if (usePG) {
+    const { rows } = await pgPool.query(`select email, display_name from users where id=$1`, [req.session.userId]);
+    const u = rows[0];
+    return res.json({ userId: req.session.userId, email: u?.email || null, displayName: u?.display_name || null });
+  } else {
+    return res.json({ userId: 1, email: "dev@example.com", displayName: "Developer" });
+  }
+});
+
+// Update display name
+app.patch("/api/me", requireAuth, async (req, res) => {
+  try {
+    const { displayName } = req.body || {};
+    if (usePG) {
+      await pgPool.query(`update users set display_name=$1 where id=$2`, [displayName || null, req.session.userId]);
+      return res.json({ ok: true, displayName: displayName || null });
+    } else {
+      return res.json({ ok: true, displayName: displayName || null });
+    }
+  } catch (e) {
+    console.error("PATCH /api/me error:", e);
+    res.status(500).json({ error: "failed to update profile" });
+  }
 });
 
 // ---------- Data routes (protected) ----------
@@ -206,13 +264,38 @@ app.put("/api/projects", requireAuth, async (req, res) => {
   }
 });
 
-// --- Dev-only backup utilities still available in file mode ---
-if (!usePG) {
-  app.get("/api/backups", (_req, res) => {
-    const items = listBackups().map(({ name, mtime }) => ({ name, mtime }));
-    res.json({ backups: items, count: items.length, keeping: MAX_BACKUPS });
-  });
-}
+// ---- Per-user backup / restore ----
+app.get("/api/backup", requireAuth, async (req, res) => {
+  try {
+    if (usePG) {
+      const { rows } = await pgPool.query(
+        `select payload, updated_at from app_state where user_id=$1`,
+        [req.session.userId]
+      );
+      const { payload = [], updated_at = new Date() } = rows[0] || {};
+      return res.json({ payload, updatedAt: updated_at });
+    } else {
+      const payload = readAllFile();
+      return res.json({ payload, updatedAt: new Date().toISOString() });
+    }
+  } catch (e) {
+    console.error("GET /api/backup error:", e);
+    res.status(500).json({ error: "failed to get backup" });
+  }
+});
+
+app.post("/api/restore", requireAuth, async (req, res) => {
+  try {
+    const { payload } = req.body || {};
+    if (!Array.isArray(payload)) return res.status(400).json({ error: "payload must be an array" });
+    if (usePG) await writeAllPG(req.session.userId, payload);
+    else writeAllFileAndBackup(payload);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("POST /api/restore error:", e);
+    res.status(500).json({ error: "failed to restore" });
+  }
+});
 
 // ---- Serve React build (single-domain deploy) ----
 const CLIENT_DIR = path.join(__dirname, "build");
