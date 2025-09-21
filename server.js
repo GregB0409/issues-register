@@ -1,4 +1,4 @@
-// server.js — Auth + dual storage: Postgres in prod, file+backups in dev
+// server.js — Auth + Postgres(prod) / File(dev), sessions, profile, backup/restore, serve React build
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
@@ -10,26 +10,24 @@ const app = express();
 const PORT = process.env.PORT || 5001;
 const usePG = !!process.env.DATABASE_URL;
 
-app.use(cors({ origin: true, credentials: true })); // allow cookies
+app.set("trust proxy", 1);
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "1mb" }));
-app.set("trust proxy", 1); // needed on some hosts to set secure cookies
 
-// --- session cookies (secure login) ---
+// --- Session cookies ---
 const SESSION_SECRET = process.env.SESSION_SECRET || "dev-insecure";
-const IN_PROD = process.env.NODE_ENV === "production";
-
+const IS_PROD = process.env.NODE_ENV === "production";
 app.use(
   cookieSession({
     name: "sess",
     secret: SESSION_SECRET,
     httpOnly: true,
-    // We use a single domain now, so LAX is perfect (works on localhost HTTP and on HTTPS in prod)
-    sameSite: "lax",
-    secure: IN_PROD, // false on localhost (HTTP), true on Render (HTTPS)
+    // In production we allow cross-site cookies so localhost can log into Render API.
+    sameSite: IS_PROD ? "none" : "lax",
+    secure: IS_PROD,
     maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
   })
 );
-
 
 // ---------- File storage (dev only) ----------
 const DATA_DIR = path.join(__dirname, "data");
@@ -48,20 +46,35 @@ function writeFileAtomic(file, jsonVal) {
   fs.renameSync(tmp, file);
 }
 function readAllFile() {
-  try { return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8")); } catch { return []; }
+  try {
+    return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+  } catch {
+    return [];
+  }
 }
 function listBackups() {
   if (!fs.existsSync(BK_DIR)) return [];
-  return fs.readdirSync(BK_DIR)
-    .filter(f => f.endsWith(".json"))
-    .map(f => ({ name: f, path: path.join(BK_DIR, f), mtime: fs.statSync(path.join(BK_DIR, f)).mtimeMs }))
-    .sort((a,b) => b.mtime - a.mtime);
+  return fs
+    .readdirSync(BK_DIR)
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => ({
+      name: f,
+      path: path.join(BK_DIR, f),
+      mtime: fs.statSync(path.join(BK_DIR, f)).mtimeMs,
+    }))
+    .sort((a, b) => b.mtime - a.mtime);
 }
 function createBackup(snapshot) {
   const ts = new Date().toISOString().replace(/:/g, "-");
   writeFileAtomic(path.join(BK_DIR, `${ts}.json`), snapshot);
   const all = listBackups();
-  if (all.length > MAX_BACKUPS) for (const f of all.slice(MAX_BACKUPS)) { try { fs.unlinkSync(f.path); } catch {} }
+  if (all.length > MAX_BACKUPS) {
+    for (const f of all.slice(MAX_BACKUPS)) {
+      try {
+        fs.unlinkSync(f.path);
+      } catch {}
+    }
+  }
 }
 function writeAllFileAndBackup(value) {
   const payload = value ?? [];
@@ -90,22 +103,34 @@ async function initPG() {
       payload jsonb not null default '[]'::jsonb,
       updated_at timestamptz not null default now()
     );
+    do $$
+    begin
+      if not exists (
+        select 1 from information_schema.columns
+        where table_name='users' and column_name='display_name'
+      ) then
+        alter table users add column display_name text;
+      end if;
+    end $$;
   `);
-  // If existing table lacked display_name
-  await pgPool.query(`alter table users add column if not exists display_name text;`);
 }
 async function getUserByEmail(email) {
   const { rows } = await pgPool.query(`select * from users where email=$1`, [email]);
   return rows[0] || null;
 }
+async function getUserById(id) {
+  const { rows } = await pgPool.query(
+    `select id, email, display_name from users where id=$1`,
+    [id]
+  );
+  return rows[0] || null;
+}
 async function createUser(email, password, displayName) {
   const hash = await bcrypt.hash(password, 12);
   const { rows } = await pgPool.query(
-    `insert into users (email, password_hash, display_name) values ($1,$2,$3)
-     returning id, email, display_name`,
+    `insert into users (email, password_hash, display_name) values ($1,$2,$3) returning id, email, display_name`,
     [email, hash, displayName || null]
   );
-  // pre-create empty state row
   await pgPool.query(
     `insert into app_state (user_id, payload) values ($1, '[]'::jsonb) on conflict (user_id) do nothing`,
     [rows[0].id]
@@ -124,6 +149,18 @@ async function writeAllPG(userId, value) {
     [userId, JSON.stringify(payload)]
   );
 }
+async function updatePasswordPG(userId, oldPassword, newPassword) {
+  const { rows } = await pgPool.query(`select password_hash from users where id=$1`, [userId]);
+  const u = rows[0];
+  if (!u) throw new Error("user not found");
+  const ok = await bcrypt.compare(oldPassword, u.password_hash);
+  if (!ok) throw new Error("invalid credentials");
+  const hash = await bcrypt.hash(newPassword, 12);
+  await pgPool.query(`update users set password_hash=$1 where id=$2`, [hash, userId]);
+}
+async function updateDisplayNamePG(userId, displayName) {
+  await pgPool.query(`update users set display_name=$1 where id=$2`, [displayName || null, userId]);
+}
 
 // ---------- Auth helpers ----------
 function requireAuth(req, res, next) {
@@ -139,13 +176,15 @@ app.post("/api/auth/register", async (req, res) => {
     if (usePG) {
       const existing = await getUserByEmail(email);
       if (existing) return res.status(409).json({ error: "email already exists" });
-      const user = await createUser(email, password, name);
+      const user = await createUser(email, password, name || null);
       req.session.userId = user.id;
-      res.json({ ok: true, email: user.email, displayName: user.display_name || null });
+      return res.json({ ok: true, email: user.email, displayName: user.display_name || null });
     } else {
-      // dev only: single user session without DB
+      // dev only: single user; store email/displayName in cookie session to show "Signed in as"
       req.session.userId = 1;
-      res.json({ ok: true, email, displayName: name || null });
+      req.session.email = email;
+      req.session.displayName = name || null;
+      return res.json({ ok: true, email, displayName: name || null });
     }
   } catch (e) {
     console.error("register error:", e);
@@ -154,19 +193,25 @@ app.post("/api/auth/register", async (req, res) => {
 });
 
 app.post("/api/auth/login", async (req, res) => {
-  const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: "email and password required" });
-  if (usePG) {
-    const user = await getUserByEmail(email);
-    if (!user) return res.status(401).json({ error: "invalid credentials" });
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: "invalid credentials" });
-    req.session.userId = user.id;
-    return res.json({ ok: true, email: user.email, displayName: user.display_name || null });
-  } else {
-    // dev only: accept anything, single user
-    req.session.userId = 1;
-    return res.json({ ok: true, email });
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: "email and password required" });
+    if (usePG) {
+      const user = await getUserByEmail(email);
+      if (!user) return res.status(401).json({ error: "invalid credentials" });
+      const ok = await bcrypt.compare(password, user.password_hash);
+      if (!ok) return res.status(401).json({ error: "invalid credentials" });
+      req.session.userId = user.id;
+      return res.json({ ok: true, email: user.email, displayName: user.display_name || null });
+    } else {
+      // dev only: accept anything
+      req.session.userId = 1;
+      req.session.email = email;
+      return res.json({ ok: true, email, displayName: req.session.displayName || null });
+    }
+  } catch (e) {
+    console.error("login error:", e);
+    res.status(500).json({ error: "failed to login" });
   }
 });
 
@@ -175,7 +220,6 @@ app.post("/api/auth/logout", (req, res) => {
   res.json({ ok: true });
 });
 
-// Change password (requires login)
 app.post("/api/auth/change-password", requireAuth, async (req, res) => {
   try {
     const { oldPassword, newPassword } = req.body || {};
@@ -183,63 +227,61 @@ app.post("/api/auth/change-password", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "newPassword must be at least 6 chars" });
     }
     if (usePG) {
-      const { rows } = await pgPool.query(`select id, password_hash from users where id=$1`, [req.session.userId]);
-      const user = rows[0];
-      if (!user) return res.status(404).json({ error: "user not found" });
-      const ok = await bcrypt.compare(oldPassword || "", user.password_hash);
-      if (!ok) return res.status(401).json({ error: "old password incorrect" });
-      const newHash = await bcrypt.hash(newPassword, 12);
-      await pgPool.query(`update users set password_hash=$1 where id=$2`, [newHash, req.session.userId]);
-      return res.json({ ok: true });
+      await updatePasswordPG(req.session.userId, oldPassword || "", newPassword);
     } else {
-      // dev mode: accept any oldPassword
-      return res.json({ ok: true });
+      // dev only: pretend success
     }
+    res.json({ ok: true });
   } catch (e) {
     console.error("change-password error:", e);
-    res.status(500).json({ error: "failed to change password" });
+    res.status(401).json({ error: e.message || "failed to change password" });
   }
 });
 
-// Profile
+// ---------- Me (profile) ----------
 app.get("/api/me", async (req, res) => {
   if (!req.session.userId) return res.json({ userId: null });
   if (usePG) {
-    const { rows } = await pgPool.query(`select email, display_name from users where id=$1`, [req.session.userId]);
-    const u = rows[0];
-    return res.json({ userId: req.session.userId, email: u?.email || null, displayName: u?.display_name || null });
+    const u = await getUserById(req.session.userId);
+    return res.json({
+      userId: u?.id || null,
+      email: u?.email || null,
+      displayName: u?.display_name || null,
+    });
   } else {
-    return res.json({ userId: 1, email: "dev@example.com", displayName: "Developer" });
+    return res.json({
+      userId: req.session.userId || null,
+      email: req.session.email || null,
+      displayName: req.session.displayName || null,
+    });
   }
 });
 
-// Update display name
 app.patch("/api/me", requireAuth, async (req, res) => {
   try {
     const { displayName } = req.body || {};
     if (usePG) {
-      await pgPool.query(`update users set display_name=$1 where id=$2`, [displayName || null, req.session.userId]);
-      return res.json({ ok: true, displayName: displayName || null });
+      await updateDisplayNamePG(req.session.userId, displayName || null);
     } else {
-      return res.json({ ok: true, displayName: displayName || null });
+      req.session.displayName = displayName || null;
     }
+    res.json({ ok: true });
   } catch (e) {
-    console.error("PATCH /api/me error:", e);
+    console.error("me patch error:", e);
     res.status(500).json({ error: "failed to update profile" });
   }
 });
 
 // ---------- Data routes (protected) ----------
-app.get("/api/projects", requireAuth, async (_req, res) => {
+app.get("/api/projects", requireAuth, async (req, res) => {
   try {
-    if (usePG) return res.json(await readAllPG(_req.session.userId));
+    if (usePG) return res.json(await readAllPG(req.session.userId));
     return res.json(readAllFile());
   } catch (e) {
     console.error("GET /api/projects error:", e);
     res.status(500).json({ error: "failed to read projects" });
   }
 });
-
 app.post("/api/projects", requireAuth, async (req, res) => {
   try {
     const body = req.body ?? [];
@@ -251,7 +293,6 @@ app.post("/api/projects", requireAuth, async (req, res) => {
     res.status(500).json({ error: "failed to save projects" });
   }
 });
-
 app.put("/api/projects", requireAuth, async (req, res) => {
   try {
     const body = req.body ?? [];
@@ -264,26 +305,16 @@ app.put("/api/projects", requireAuth, async (req, res) => {
   }
 });
 
-// ---- Per-user backup / restore ----
+// ---------- Backup/Restore (works in PG + file modes) ----------
 app.get("/api/backup", requireAuth, async (req, res) => {
   try {
-    if (usePG) {
-      const { rows } = await pgPool.query(
-        `select payload, updated_at from app_state where user_id=$1`,
-        [req.session.userId]
-      );
-      const { payload = [], updated_at = new Date() } = rows[0] || {};
-      return res.json({ payload, updatedAt: updated_at });
-    } else {
-      const payload = readAllFile();
-      return res.json({ payload, updatedAt: new Date().toISOString() });
-    }
+    const payload = usePG ? await readAllPG(req.session.userId) : readAllFile();
+    res.json({ payload });
   } catch (e) {
     console.error("GET /api/backup error:", e);
-    res.status(500).json({ error: "failed to get backup" });
+    res.status(500).json({ error: "failed to create backup" });
   }
 });
-
 app.post("/api/restore", requireAuth, async (req, res) => {
   try {
     const { payload } = req.body || {};
@@ -297,14 +328,15 @@ app.post("/api/restore", requireAuth, async (req, res) => {
   }
 });
 
-// ---- Serve React build (single-domain deploy) ----
+// ---- Serve React build (same-origin production) ----
 const CLIENT_DIR = path.join(__dirname, "build");
 app.use(express.static(CLIENT_DIR));
-// SPA fallback: any GET that does NOT start with /api/
-app.get(/^\/(?!api\/).*/, (req, res) => {
+app.get("*", (req, res) => {
+  if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   res.sendFile(path.join(CLIENT_DIR, "index.html"));
 });
 
+// ---- Boot ----
 (async () => {
   if (usePG) {
     await initPG();
