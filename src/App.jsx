@@ -1,9 +1,8 @@
 import "./App.css";
 import React, { useState, useEffect, useMemo } from "react";
 
-const API_BASE = "https://issues-register.onrender.com";
+const API_BASE = "";
 
-// ----- Exact endpoints from your server.js -----
 const ENDPOINTS = {
   register: "/api/auth/register",
   login: "/api/auth/login",
@@ -12,7 +11,6 @@ const ENDPOINTS = {
   projects: "/api/projects",
 };
 
-// Always include cookies
 async function apiFetch(path, { method = "GET", body, headers, ...rest } = {}) {
   const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
   const init = {
@@ -27,7 +25,7 @@ async function apiFetch(path, { method = "GET", body, headers, ...rest } = {}) {
   };
   const res = await fetch(url, init);
   let data = null;
-  try { data = await res.json(); } catch { /* non-JSON OK */ }
+  try { data = await res.json(); } catch {}
   if (!res.ok) {
     const msg = (data && (data.error || data.message)) || `${res.status} ${res.statusText}`;
     throw new Error(msg);
@@ -44,7 +42,7 @@ const todayPrefix = () => {
 };
 
 function AuthPanel({ me, refreshMe }) {
-  const [mode, setMode] = useState("login"); // 'login' | 'signup'
+  const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -135,23 +133,34 @@ function AuthPanel({ me, refreshMe }) {
 }
 
 export default function App() {
-  const [projects, setProjects] = useState([
-    { name: "", issues: [{ issue: todayPrefix(), statuses: [todayPrefix()], closed: false }] },
-  ]);
+  // CHANGED: start empty so nothing shows while logged out
+  const [projects, setProjects] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [fromBackend, setFromBackend] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // auth
   const [me, setMe] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
 
-  async function refreshMe() {
-    try { const data = await apiFetch(ENDPOINTS.me); setMe(data); }
-    catch { setMe({ userId: null }); }
+  const refreshMe = async () => {
+  try {
+    const data = await apiFetch(ENDPOINTS.me);
+    setMe(data);
+    if (data?.userId) {
+      // logged in → leave projects; loader effect will fetch
+      return;
+    }
+    // logged out → immediately clear UI
+    setProjects([]);
+    setLoaded(false);
+  } catch {
+    // treat errors as logged-out
+    setMe({ userId: null });
+    setProjects([]);
+    setLoaded(false);
   }
+};
 
-  // Check session on mount
   useEffect(() => {
     (async () => {
       await refreshMe();
@@ -159,9 +168,9 @@ export default function App() {
     })();
   }, []);
 
-  // Load projects only *after* we know we are logged in
+  // Only load projects AFTER we know we’re logged in
   useEffect(() => {
-    if (!me?.userId) return; // not logged in yet
+    if (!me?.userId) return;
     (async () => {
       try {
         const data = await apiFetch(ENDPOINTS.projects);
@@ -170,6 +179,7 @@ export default function App() {
           setProjects(data);
           setFromBackend(true);
         } else {
+          // new user: give a dated first row
           setProjects([{ name: "", issues: [{ issue: todayPrefix(), statuses: [todayPrefix()], closed: false }] }]);
           setFromBackend(false);
         }
@@ -182,7 +192,7 @@ export default function App() {
     })();
   }, [me?.userId]);
 
-  // Auto-save 1s after edits (only if loaded and logged in)
+  // Auto-save only when logged in & loaded
   useEffect(() => {
     if (!loaded || !me?.userId) return;
     const timeout = setTimeout(() => {
@@ -250,70 +260,73 @@ export default function App() {
         </div>
       ) : null}
 
-      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 12 }}>
-        <thead>
-          <tr>
-            <th style={{ textAlign: "center" }}>
-              <button onClick={addProject} style={{ marginBottom: "5px" }}>+ Add Project/Matter</button>
-              <div>Project / Matter</div>
-            </th>
-            <th style={{ textAlign: "center" }}><div>Issue</div></th>
-            <th>Status Updates</th>
-            <th style={{ textAlign: "center", whiteSpace: "nowrap", width: "1%" }}>Closed</th>
-          </tr>
-        </thead>
-        <tbody>
-          {projects.map((project, pIndex) => {
-            const issueCount = project.issues.length;
-            return (
-              <React.Fragment key={pIndex}>
-                {project.issues.map((issue, iIndex) => (
-                  <tr key={`${pIndex}-${iIndex}`}>
-                    {iIndex === 0 && (
-                      <td rowSpan={issueCount} style={{ position: "relative", padding: 0, verticalAlign: "top" }}>
-                        <textarea
-                          value={project.name}
-                          onChange={(e) => handleProjectNameChange(pIndex, e.target.value)}
-                          placeholder="Project / Matter"
-                          style={{ width: "100%", height: `${issueCount * 60}px`, boxSizing: "border-box", resize: "none" }}
-                        />
-                        <button onClick={() => addIssue(pIndex)} style={{ position: "absolute", bottom: "5px", right: "5px" }}>
-                          + Add Issue
-                        </button>
-                      </td>
-                    )}
-
-                    <td>
-                      <textarea
-                        value={issue.issue}
-                        onChange={(e) => handleIssueChange(pIndex, iIndex, "issue", e.target.value)}
-                        placeholder="Issue"
-                      />
-                    </td>
-
-                    <td>
-                      <div style={{ display: "flex", flexDirection: "column" }}>
-                        {issue.statuses.map((status, sIndex) => (
+      {/* CHANGED: render table only when logged in */}
+      {me?.userId ? (
+        <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 12 }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: "center" }}>
+                <button onClick={addProject} style={{ marginBottom: "5px" }}>+ Add Project/Matter</button>
+                <div>Project / Matter</div>
+              </th>
+              <th style={{ textAlign: "center" }}><div>Issue</div></th>
+              <th>Status Updates</th>
+              <th style={{ textAlign: "center", whiteSpace: "nowrap", width: "1%" }}>Closed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {projects.map((project, pIndex) => {
+              const issueCount = project.issues.length;
+              return (
+                <React.Fragment key={pIndex}>
+                  {project.issues.map((issue, iIndex) => (
+                    <tr key={`${pIndex}-${iIndex}`}>
+                      {iIndex === 0 && (
+                        <td rowSpan={issueCount} style={{ position: "relative", padding: 0, verticalAlign: "top" }}>
                           <textarea
-                            key={sIndex}
-                            value={status}
-                            onChange={(e) => handleStatusChange(pIndex, iIndex, sIndex, e.target.value)}
-                            style={{ margin: 0, border: "none", borderBottom: sIndex !== issue.statuses.length - 1 ? "1px solid #ccc" : "none" }}
-                            placeholder="Status update"
+                            value={project.name}
+                            onChange={(e) => handleProjectNameChange(pIndex, e.target.value)}
+                            placeholder="Project / Matter"
+                            style={{ width: "100%", height: `${issueCount * 60}px`, boxSizing: "border-box", resize: "none" }}
                           />
-                        ))}
-                      </div>
-                    </td>
-                    <td style={{ textAlign: "center", whiteSpace: "nowrap", width: "1%" }}>
-                      <input type="checkbox" checked={issue.closed} onChange={() => handleClosedToggle(pIndex, iIndex)} />
-                    </td>
-                  </tr>
-                ))}
-              </React.Fragment>
-            );
-          })}
-        </tbody>
-      </table>
+                          <button onClick={() => addIssue(pIndex)} style={{ position: "absolute", bottom: "5px", right: "5px" }}>
+                            + Add Issue
+                          </button>
+                        </td>
+                      )}
+
+                      <td>
+                        <textarea
+                          value={issue.issue}
+                          onChange={(e) => handleIssueChange(pIndex, iIndex, "issue", e.target.value)}
+                          placeholder="Issue"
+                        />
+                      </td>
+
+                      <td>
+                        <div style={{ display: "flex", flexDirection: "column" }}>
+                          {issue.statuses.map((status, sIndex) => (
+                            <textarea
+                              key={sIndex}
+                              value={status}
+                              onChange={(e) => handleStatusChange(pIndex, iIndex, sIndex, e.target.value)}
+                              style={{ margin: 0, border: "none", borderBottom: sIndex !== issue.statuses.length - 1 ? "1px solid #ccc" : "none" }}
+                              placeholder="Status update"
+                            />
+                          ))}
+                        </div>
+                      </td>
+                      <td style={{ textAlign: "center", whiteSpace: "nowrap", width: "1%" }}>
+                        <input type="checkbox" checked={issue.closed} onChange={() => handleClosedToggle(pIndex, iIndex)} />
+                      </td>
+                    </tr>
+                  ))}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      ) : null}
     </div>
   );
 }
