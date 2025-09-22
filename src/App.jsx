@@ -1,7 +1,6 @@
 import "./App.css";
 import React, { useState, useEffect, useMemo } from "react";
 
-// All API calls go to /api/... (same-origin in prod; proxied in dev)
 const API_BASE = "";
 
 const ENDPOINTS = {
@@ -44,6 +43,7 @@ const todayPrefix = () => {
 
 function AuthPanel({ me, refreshMe }) {
   const [mode, setMode] = useState("login");
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -60,7 +60,10 @@ function AuthPanel({ me, refreshMe }) {
     setBusy(true); setError("");
     try {
       if (mode === "signup") {
-        await apiFetch(ENDPOINTS.register, { method: "POST", body: { email, password } });
+        await apiFetch(ENDPOINTS.register, {
+          method: "POST",
+          body: { email, password, name: name || null },
+        });
       } else {
         await apiFetch(ENDPOINTS.login, { method: "POST", body: { email, password } });
       }
@@ -91,7 +94,7 @@ function AuthPanel({ me, refreshMe }) {
         <div style={styles.rowBetween}>
           <div>
             <div style={styles.muted}>Signed in as</div>
-            <div style={styles.bold}>{me.email || me.userId}</div>
+            <div style={styles.bold}>{me.email}</div>
           </div>
           <button onClick={doLogout} disabled={busy} style={styles.button}>
             {busy ? "…" : "Log out"}
@@ -109,6 +112,17 @@ function AuthPanel({ me, refreshMe }) {
         <button type="button" onClick={() => setMode("signup")}
           style={{ ...styles.tab, ...(mode === "signup" ? styles.tabActive : {}) }}>Sign up</button>
       </div>
+
+      {mode === "signup" && (
+        <label style={styles.label}>Name (optional)
+          <input
+            value={name}
+            onChange={(e)=>setName(e.target.value)}
+            style={styles.input}
+            placeholder="Your display name"
+          />
+        </label>
+      )}
 
       <label style={styles.label}>Email
         <input type="email" autoComplete="email" value={email}
