@@ -2,6 +2,7 @@
   "name": "issues-register",
   "version": "1.0.0",
   "private": true,
+  "proxy": "https://issues-register.onrender.com",
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.6.4",
