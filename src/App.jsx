@@ -94,7 +94,7 @@ function AuthPanel({ me, refreshMe }) {
         <div style={styles.rowBetween}>
           <div>
             <div style={styles.muted}>Signed in as</div>
-            <div style={styles.bold}>{me.email || me.userId}</div>
+            <div style={styles.bold}>{me.email}</div>
           </div>
           <button onClick={doLogout} disabled={busy} style={styles.button}>
             {busy ? "…" : "Log out"}

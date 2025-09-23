@@ -91,6 +91,15 @@ async function getUserByEmail(email) {
   const { rows } = await pgPool.query(`select * from users where email=$1`, [email]);
   return rows[0] || null;
 }
+
+async function getUserById(id) {
+  const { rows } = await pgPool.query(
+    "select id, email, display_name from users where id=$1",
+    [id]
+  );
+  return rows[0] || null;
+}
+
 async function createUser(email, password) {
   const hash = await bcrypt.hash(password, 12);
   const { rows } = await pgPool.query(
@@ -133,10 +142,14 @@ app.post("/api/auth/register", async (req, res) => {
       if (existing) return res.status(409).json({ error: "email already exists" });
       const user = await createUser(email, password);
       req.session.userId = user.id;
+      req.session.email = user.email || email;
+      req.session.displayName = user.display_name || null;
       res.json({ ok: true, email: user.email });
     } else {
       // dev only: single user session without DB
       req.session.userId = 1;
+      req.session.email = email;
+      req.session.displayName = null;
       res.json({ ok: true, email });
     }
   } catch (e) {
@@ -154,10 +167,13 @@ app.post("/api/auth/login", async (req, res) => {
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: "invalid credentials" });
     req.session.userId = user.id;
+    req.session.email = user.email;
+    req.session.displayName = user.display_name || null;
     return res.json({ ok: true, email: user.email });
   } else {
     // dev only: accept anything, single user
     req.session.userId = 1;
+    req.session.email = email;
     return res.json({ ok: true, email });
   }
 });
@@ -167,8 +183,36 @@ app.post("/api/auth/logout", (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/me", (req, res) => {
-  res.json({ userId: req.session.userId || null });
+// helper (place near your other PG helpers)
+async function getUserById(id) {
+  const { rows } = await pgPool.query(
+    "select id, email, display_name from users where id=$1",
+    [id]
+  );
+  return rows[0] || null;
+}
+
+// me route (returns email)
+app.get("/api/me", async (req, res) => {
+  if (!req.session.userId) {
+    return res.json({ userId: null, email: null, displayName: null });
+  }
+
+  if (usePG) {
+    const u = await getUserById(req.session.userId);
+    return res.json({
+      userId: u?.id ?? null,
+      email: u?.email ?? null,
+      displayName: u?.display_name ?? null,
+    });
+  } else {
+    // dev fallback
+    return res.json({
+      userId: req.session.userId ?? null,
+      email: req.session.email ?? null,
+      displayName: req.session.displayName ?? null,
+    });
+  }
 });
 
 // ---------- Data routes (protected) ----------
