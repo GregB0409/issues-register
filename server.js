@@ -167,22 +167,8 @@ app.post("/api/auth/logout", (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/me", async (req, res) => {
-  if (!req.session.userId) return res.json({ userId: null });
-  if (usePG) {
-    const u = await getUserById(req.session.userId); // id, email, display_name
-    return res.json({
-      userId: u?.id ?? null,
-      email: u?.email ?? null,
-      displayName: u?.display_name ?? null,
-    });
-  } else {
-    return res.json({
-      userId: req.session.userId ?? null,
-      email: req.session.email ?? null,
-      displayName: req.session.displayName ?? null,
-    });
-  }
+app.get("/api/me", (req, res) => {
+  res.json({ userId: req.session.userId || null });
 });
 
 // ---------- Data routes (protected) ----------
