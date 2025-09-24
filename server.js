@@ -86,6 +86,7 @@ async function initPG() {
       updated_at timestamptz not null default now()
     );
   `);
+  await pgPool.query(`alter table if exists users add column if not exists display_name text;`);
 }
 async function getUserByEmail(email) {
   const { rows } = await pgPool.query(`select * from users where email=$1`, [email]);
@@ -124,6 +125,9 @@ async function writeAllPG(userId, value) {
      on conflict (user_id) do update set payload = excluded.payload, updated_at = now()`,
     [userId, JSON.stringify(payload)]
   );
+}
+async function updateDisplayNamePG(userId, displayName) {
+  await pgPool.query(`update users set display_name=$1 where id=$2`, [displayName, userId]);
 }
 
 // ---------- Auth helpers ----------
@@ -212,6 +216,22 @@ app.get("/api/me", async (req, res) => {
       email: req.session.email ?? null,
       displayName: req.session.displayName ?? null,
     });
+  }
+});
+
+app.patch("/api/me", requireAuth, async (req, res) => {
+  try {
+    const { displayName } = req.body || {};
+    if (usePG) {
+      await updateDisplayNamePG(req.session.userId, displayName || null);
+    } else {
+      // dev mode: store in session so the UI can show it
+      req.session.displayName = displayName || null;
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("me patch error:", e);
+    res.status(500).json({ error: "failed to update profile" });
   }
 });
 
